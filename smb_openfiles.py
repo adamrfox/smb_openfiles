@@ -5,6 +5,8 @@ import getpass
 import json
 import sys
 import getopt
+import socket
+import netaddr
 
 def get_openfiles (node, user, password):
   path = "/platform/1/protocols/smb/openfiles"
@@ -18,6 +20,75 @@ def get_openfiles (node, user, password):
 def dprint (message):
   if DEBUG:
     print "DEBUG: " + message + "\n"
+
+def api_check (host, user, password):
+  global cluster
+  try:
+    ip = socket.gethostbyname (host)
+  except:
+    return (False)
+  path = "/platform/3/cluster/config"
+  try:
+    (status, reason, resp) = papi.call (ip, '8080', 'GET', path, '', 'any', 'application/json', user, password)
+  except:
+    return (False)
+  if status != 200:
+    return (False)
+  data = json.loads (resp)
+  cluster = data['name']
+  return (True)
+
+def get_pool_from_ip (data, addr):
+  pool = ""
+  addr_o = netaddr.IPAddress (addr)
+  for i , inf in enumerate (data['pools']):
+    for j, rng in enumerate (data['pools'][i]['ranges']):
+      ip_range = list (netaddr.iter_iprange(data['pools'][i]['ranges'][j]['low'], data['pools'][i]['ranges'][j]['high']))
+      if (addr_o in ip_range):
+        pool = data['pools'][i]['id']
+        return (pool)
+  return (pool)
+
+def get_addr_from_int (int_d, pool_d, pool):
+  for x, p in enumerate (pool_d['pools']):
+    if pool_d['pools'][x]['id'] == pool:
+      for y, r in enumerate (pool_d['pools'][x]['ranges']):
+        ip_range = list (netaddr.iter_iprange(pool_d['pools'][x]['ranges'][y]['low'],pool_d['pools'][x]['ranges'][y]['high']))
+        for z, s in enumerate (int_d['ip_addrs']):
+          ip_a = netaddr.IPAddress(int_d['ip_addrs'][z])
+          if (ip_a in ip_range):
+            return (int_d['ip_addrs'][z])
+
+
+def get_addr_list_from_pool (ifs_d, pool_d,pool):
+  found_addr = ""
+  pf = pool.split ('.')
+  for i, inf in enumerate (ifs_d['interfaces']):
+    for j, own in enumerate (ifs_d['interfaces'][i]['owners']):
+      if ifs_d['interfaces'][i]['owners'][j]['groupnet'] == pf[0] and ifs_d['interfaces'][i]['owners'][j]['subnet'] == pf[1] and ifs_d['interfaces'][i]['owners'][j]['pool'] == pf[2]:
+        found_addr = get_addr_from_int(ifs_d['interfaces'][i], pool_d, pool)
+        lnn = str(ifs_d['interfaces'][i]['lnn'])
+        addr_list[lnn] = found_addr
+#        addr_list.append (found_addr)
+        break
+  return (addr_list)
+
+
+def get_addr_list (host, user, password):
+  path = "/platform/3/network/interfaces?sort=lnn&dir=ASC"
+  (status, reason, resp) = papi.call (host, '8080', 'GET', path, 'any', '', 'application/json', user, password)
+  if status != 200:
+    print "Bad Status: /network/interfaces: " + str(status)
+    exit (status)
+  int_data = json.loads (resp)
+  path = "/platform/3/network/pools"
+  (status, reason, resp) = papi.call (host, '8080', 'GET', path, 'any', '', 'application/json', user, password)
+  if status != 200:
+    print "Bad Status: /network/pools: " + str(status)
+    exit (status)
+  pool_data = json.loads (resp)
+  pool = get_pool_from_ip (pool_data, host)
+  return (get_addr_list_from_pool (int_data, pool_data, pool))
 
 def usage ():
   sys.stderr.write ("Usage: smb_openfiles[.py]\n")
@@ -34,8 +105,7 @@ def usage ():
 
 
 cluster = ''
-cluster_list = []
-node_list = []
+cluster_list = {}
 user = ""
 password = ""
 conf_file = "nodes.conf"
@@ -43,8 +113,11 @@ MODE = "view"
 node = ""
 id_list = []
 user_name = ""
-addr_list = []
+addr_list = {}
 node_num_s = ""
+file_flag = False
+cluster_flag = False
+has_v3_api = False
 DEBUG = 0
 ALL = 1
 
@@ -54,8 +127,10 @@ for opt, a in optlist:
     DEBUG = 1
   if opt in ('-C', "--cluster"):
     ALL = 0
+    cluster_flag = True
     cluster = a
   if opt in ('-f', "--file"):
+    file_flag = True
     conf_file = a
   if opt in ('-c', "--close"):
     MODE = "close"
@@ -68,23 +143,47 @@ for opt, a in optlist:
   if opt in ('-h' , "--help"):
     usage()
 
-for node in open (conf_file):
-  node_s = node.rstrip ('\r\n')
-  nl = node_s.split (':')
-  if ALL == 0 and nl[0] != cluster:
-    continue
-  cluster_list.append (nl[0])
-  node_list.append (nl[1])
-  addr_list.append (nl[2])
-if (len(addr_list) == 0):
-  print "No Clusters Found."
-  exit (0)
+user = raw_input ("User: ")
+password = getpass.getpass ("Password: :")
+if cluster_flag == False and file_flag == False:
+  if MODE == "view":
+    x = len (sys.argv)-1
+    host = sys.argv[x]
+    has_v3_api = api_check (host, user, password)
+  else:
+    nnf = node_num_s.split ('-')
+    node_name = nnf[0]
+    node_num = nnf[1]
+    check1 = api_check (node_num_s, user, password)
+    check2 = api_check (node_name, user, password)
+    if check1 == True:
+      has_v3_api = True
+      host = node_num_s
+    elif check2 == True:
+      has_v3_api = True
+      host = node_name
+    else:
+      has_v3_api = False
+if has_v3_api ==  False:
+  for node in open (conf_file):
+    node_s = node.rstrip ('\r\n')
+    nl = node_s.split (':')
+    if ALL == 0 and nl[0] != cluster:
+      continue
+    cluster_list[nl[1]] = nl[0]
+    addr_list[nl[1]] = nl[2]
+  if (len(addr_list) == 0):
+    print "No Clusters Found."
+    exit (0)
+else:
+  addr_list = get_addr_list (host, user, password)
+  for i in addr_list.keys():
+    cluster_list[i] = cluster
+
 if MODE == "view":
-  user = raw_input ("User: ")
-  password = getpass.getpass ("Password: :")
-  for i, node in enumerate (addr_list):
-    ofiles = get_openfiles (node, user, password)
-    node_name = cluster_list[i] + "-" + node_list[i] + ":"
+  for i in sorted(cluster_list.keys()):
+    ofiles = get_openfiles (addr_list[i], user, password)
+    node_name = cluster_list[i] + "-" + str(i) + ":"
     print "--------------------------------------"
     if ofiles['total'] == 0:
       print node_name, "No Open Files"
@@ -104,17 +203,11 @@ else:
   nnf = node_num_s.split ('-')
   node_name = nnf[0]
   node_num = nnf[1]
-  for i,n in enumerate (node_list):
-    if cluster_list[i] == node_name and node_list[i] == node_num:
-      index = i
-      break
-  user = raw_input ("User: ")
-  password = getpass.getpass ("Password: ")
   for id in id_list:
     path = "/platform/1/protocols/smb/openfiles/" + id
     dprint (path)
-    dprint (addr_list[index])
-    (status, resp, reason) = papi.call (addr_list[index], '8080', 'DELETE', path, 'any', '', 'application/json', user, password)
+    dprint (addr_list[node_num])
+    (status, resp, reason) = papi.call (addr_list[node_num], '8080', 'DELETE', path, 'any', '', 'application/json', user, password)
     if status != 204:
       err_string = "Bad Status: " + `status` + "\n"
       sys.stderr.write (err_string)
