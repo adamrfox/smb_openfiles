@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/bin/python
 
 import papi
 import getpass
@@ -152,8 +152,13 @@ if cluster_flag == False and file_flag == False:
     has_v3_api = api_check (host, user, password)
   else:
     nnf = node_num_s.split ('-')
-    node_name = nnf[0]
-    node_num = nnf[1]
+    x = len(nnf)-1
+    if x > 1:
+      node_num = nnf.pop()
+      node_name = "-".join(nnf)
+    else:
+      node_name = nnf[0]
+      node_num = nnf[x]
     check1 = api_check (node_num_s, user, password)
     check2 = api_check (node_name, user, password)
     if check1 == True:
@@ -167,6 +172,8 @@ if cluster_flag == False and file_flag == False:
 if has_v3_api ==  False:
   for node in open (conf_file):
     node_s = node.rstrip ('\r\n')
+    if node_s == "":
+      continue
     nl = node_s.split (':')
     if ALL == 0 and nl[0] != cluster:
       continue
@@ -176,6 +183,7 @@ if has_v3_api ==  False:
     print "No Clusters Found."
     exit (0)
 else:
+  host = socket.gethostbyname (host)
   addr_list = get_addr_list (host, user, password)
   for i in addr_list.keys():
     cluster_list[i] = cluster
@@ -201,14 +209,19 @@ else:
     usage()
     exit (2)
   nnf = node_num_s.split ('-')
-  node_name = nnf[0]
-  node_num = nnf[1]
+  x = len(nnf)-1
+  if (x > 1):
+    node_num = nnf.pop()
+    node_name = "-".join(nnf)
+  else:
+    node_name = nnf[0]
+    node_num = nnf[x]
   for id in id_list:
     path = "/platform/1/protocols/smb/openfiles/" + id
     dprint (path)
     dprint (addr_list[node_num])
     (status, resp, reason) = papi.call (addr_list[node_num], '8080', 'DELETE', path, 'any', '', 'application/json', user, password)
-    if status != 204:
+    if status != 204 and status != 500:
       err_string = "Bad Status: " + `status` + "\n"
       sys.stderr.write (err_string)
       err = json.loads (reason)
