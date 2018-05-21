@@ -1,21 +1,33 @@
 #!/usr/local/bin/python
 
 import papi
+import isi_sdk
+from isi_sdk.rest import ApiException
+from pprint import pprint
+import urllib3
+urllib3.disable_warnings()
 import getpass
 import json
 import sys
 import getopt
 import socket
 import netaddr
+import re
+from unidecode import unidecode
 
-def get_openfiles (node, user, password):
-  path = "/platform/1/protocols/smb/openfiles"
-  (status, reason, resp) = papi.call (node, '8080', 'GET', path, '', 'any', 'application/json', user, password)
-  if status != 200:
-    err_string = "ERROR: Bad Status: " + status
-    sys.stderr.write (err_string)
-    exit (status)
-  return (json.loads(resp))
+def get_openfiles (node, user, password, limit, resume):
+  uri = "https://" + node + ":8080"
+  api_client = isi_sdk.ApiClient (uri)
+  api_inst = isi_sdk.ProtocolsApi(api_client)
+  try:
+    if resume is None:
+      resp = api_inst.get_smb_openfiles (limit=limit)
+    else:
+      resp = api_inst.get_smb_openfiles (resume=resume)
+  except ApiException as e:
+      print "Exception in get_smb_openfiles: %s\n" % e
+      exit (1)
+  return (resp)
 
 def dprint (message):
   if DEBUG:
@@ -23,19 +35,19 @@ def dprint (message):
 
 def api_check (host, user, password):
   global cluster
+  host_uri = "https://" + host + ":8080"
+  api_client = isi_sdk.ApiClient (host_uri)
+  api_inst = isi_sdk.ClusterApi(api_client)
   try:
     ip = socket.gethostbyname (host)
   except:
     return (False)
-  path = "/platform/3/cluster/config"
   try:
-    (status, reason, resp) = papi.call (ip, '8080', 'GET', path, '', 'any', 'application/json', user, password)
-  except:
+    api_response = api_inst.get_cluster_config()
+  except ApiException as e:
+    print "Exception when calling ClusterApi->get_cluster_config: %s\n" % e
     return (False)
-  if status != 200:
-    return (False)
-  data = json.loads (resp)
-  cluster = data['name']
+  cluster =  api_response.name
   return (True)
 
 def get_pool_from_ip (data, addr):
@@ -73,7 +85,9 @@ def get_addr_list_from_pool (ifs_d, pool_d,pool):
         break
   return (addr_list)
 
-
+#
+# Note: Bug in API for isi networks.  Keeping this PAPI
+#
 def get_addr_list (host, user, password):
   path = "/platform/3/network/interfaces?sort=lnn&dir=ASC"
   (status, reason, resp) = papi.call (host, '8080', 'GET', path, 'any', '', 'application/json', user, password)
@@ -89,6 +103,7 @@ def get_addr_list (host, user, password):
   pool_data = json.loads (resp)
   pool = get_pool_from_ip (pool_data, host)
   return (get_addr_list_from_pool (int_data, pool_data, pool))
+
 
 def usage ():
   sys.stderr.write ("Usage: smb_openfiles[.py]\n")
@@ -120,8 +135,11 @@ cluster_flag = False
 has_v3_api = False
 DEBUG = 0
 ALL = 1
+limit = 50
+resume = None
+match = None
 
-optlist, args = getopt.getopt (sys.argv[1:], 'DC:f:cn:i:h', ["cluster=", "file=", "close", "node=", "id=", "help"])
+optlist, args = getopt.getopt (sys.argv[1:], 'DC:f:cn:i:hl:m:', ["cluster=", "file=", "close", "node=", "id=", "help", "limit=", "match="])
 for opt, a in optlist:
   if opt == '-D':
     DEBUG = 1
@@ -142,9 +160,17 @@ for opt, a in optlist:
       id_list.append(i)
   if opt in ('-h' , "--help"):
     usage()
+  if opt in ('-l', "--limit"):
+    limit = a
+  if opt in ('-m', "--match"):
+    match = a
 
 user = raw_input ("User: ")
-password = getpass.getpass ("Password: :")
+password = getpass.getpass ("Password: ")
+isi_sdk.configuration.username = user
+isi_sdk.configuration.password = password
+isi_sdk.configuration.verify_ssl = False
+
 if cluster_flag == False and file_flag == False:
   if MODE == "view":
     x = len (sys.argv)-1
@@ -152,13 +178,8 @@ if cluster_flag == False and file_flag == False:
     has_v3_api = api_check (host, user, password)
   else:
     nnf = node_num_s.split ('-')
-    x = len(nnf)-1
-    if x > 1:
-      node_num = nnf.pop()
-      node_name = "-".join(nnf)
-    else:
-      node_name = nnf[0]
-      node_num = nnf[x]
+    node_name = nnf[0]
+    node_num = nnf[1]
     check1 = api_check (node_num_s, user, password)
     check2 = api_check (node_name, user, password)
     if check1 == True:
@@ -172,8 +193,6 @@ if cluster_flag == False and file_flag == False:
 if has_v3_api ==  False:
   for node in open (conf_file):
     node_s = node.rstrip ('\r\n')
-    if node_s == "":
-      continue
     nl = node_s.split (':')
     if ALL == 0 and nl[0] != cluster:
       continue
@@ -183,25 +202,40 @@ if has_v3_api ==  False:
     print "No Clusters Found."
     exit (0)
 else:
-  host = socket.gethostbyname (host)
   addr_list = get_addr_list (host, user, password)
   for i in addr_list.keys():
-    cluster_list[i] = cluster
-
+    if addr_list[i] != None:
+      cluster_list[i] = cluster
 if MODE == "view":
   for i in sorted(cluster_list.keys()):
-    ofiles = get_openfiles (addr_list[i], user, password)
+    done = False
+    first_run = True
     node_name = cluster_list[i] + "-" + str(i) + ":"
     print "--------------------------------------"
-    if ofiles['total'] == 0:
-      print node_name, "No Open Files"
-    else:
-      print node_name
-      print "ID: File:                                    User:            #Locks:"
-
-      print "--------------------------------------"
-      for file_inst in ofiles['openfiles']:
-        print "{0:3d} {1:40s} {2:15s} {3:2d}".format(file_inst['id'],file_inst['file'],file_inst['user'],file_inst['locks'])  
+    while done == False:
+      ofiles = get_openfiles (addr_list[i], user, password, limit, resume)
+      if first_run is True:
+        if ofiles.total == 0:
+          print node_name, "No Open Files"
+        else:
+          print node_name
+          print "ID: File:                                    User:            #Locks:"
+        print "--------------------------------------"
+        first_run = False
+      resume = ofiles.resume
+      if resume is None:
+        done = True
+      for file_inst in ofiles.openfiles:
+        if match is not None:
+          name_match = re.search (match, file_inst.file)
+          user_match = re.search (match, file_inst.user)
+          if name_match is None and user_match is None:
+            continue
+        try:
+          print "{0:3d} {1:40s} {2:15s} {3:2d}".format(file_inst.id,file_inst.file,file_inst.user,file_inst.locks)  
+        except UnicodeEncodeError:
+          file_name = unidecode (file_inst.file)
+          print "{0:3d} {1:40s} {2:15s} {3:2d}".format(file_inst.id,file_name,file_inst.user,file_inst.locks)  
     print ""
 else:
   if node_num_s == "" or len(id_list) == 0:
@@ -209,19 +243,14 @@ else:
     usage()
     exit (2)
   nnf = node_num_s.split ('-')
-  x = len(nnf)-1
-  if (x > 1):
-    node_num = nnf.pop()
-    node_name = "-".join(nnf)
-  else:
-    node_name = nnf[0]
-    node_num = nnf[x]
+  node_name = nnf[0]
+  node_num = nnf[1]
   for id in id_list:
     path = "/platform/1/protocols/smb/openfiles/" + id
     dprint (path)
     dprint (addr_list[node_num])
     (status, resp, reason) = papi.call (addr_list[node_num], '8080', 'DELETE', path, 'any', '', 'application/json', user, password)
-    if status != 204 and status != 500:
+    if status != 204:
       err_string = "Bad Status: " + `status` + "\n"
       sys.stderr.write (err_string)
       err = json.loads (reason)
